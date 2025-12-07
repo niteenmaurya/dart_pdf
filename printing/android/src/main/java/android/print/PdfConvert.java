@@ -5,7 +5,7 @@
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *     [http://www.apache.org/licenses/LICENSE-2.0](http://www.apache.org/licenses/LICENSE-2.0)
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -32,9 +32,15 @@ import java.io.InputStream;
 
 @RequiresApi(api = Build.VERSION_CODES.KITKAT)
 public class PdfConvert {
+    private static final String TAG = "PdfConvert";
+
     public static void print(final Context context, final PrintDocumentAdapter adapter,
             final PrintAttributes attributes, final Result result) {
-        adapter.onLayout(null, attributes, null, new PrintDocumentAdapter.LayoutResultCallback() {
+        
+        // CancellationSignal add kiya taaki hum process track kar sakein
+        final CancellationSignal cancellationSignal = new CancellationSignal();
+
+        adapter.onLayout(null, attributes, cancellationSignal, new PrintDocumentAdapter.LayoutResultCallback() {
             @Override
             public void onLayoutFinished(PrintDocumentInfo info, boolean changed) {
                 File outputDir = context.getCacheDir();
@@ -51,7 +57,7 @@ public class PdfConvert {
                     adapter.onWrite(new PageRange[] {PageRange.ALL_PAGES},
                             ParcelFileDescriptor.open(
                                     outputFile, ParcelFileDescriptor.MODE_READ_WRITE),
-                            new CancellationSignal(),
+                            cancellationSignal,
                             new PrintDocumentAdapter.WriteResultCallback() {
                                 @Override
                                 public void onWriteFinished(PageRange[] pages) {
@@ -59,23 +65,52 @@ public class PdfConvert {
 
                                     if (pages.length == 0) {
                                         if (!finalOutputFile.delete()) {
-                                            Log.e("PDF", "Unable to delete temporary file");
+                                            Log.e(TAG, "Unable to delete temporary file");
                                         }
                                         result.onError("No page created");
+                                    } else {
+                                        result.onSuccess(finalOutputFile);
                                     }
-
-                                    result.onSuccess(finalOutputFile);
+                                    
                                     if (!finalOutputFile.delete()) {
-                                        Log.e("PDF", "Unable to delete temporary file");
+                                        Log.e(TAG, "Unable to delete temporary file");
                                     }
+                                }
+
+                                // ✅ NEW FIX: Write Failure Handling
+                                @Override
+                                public void onWriteFailed(CharSequence error) {
+                                    super.onWriteFailed(error);
+                                    result.onError("Write failed: " + error.toString());
+                                }
+
+                                // ✅ NEW FIX: Write Cancelled Handling
+                                @Override
+                                public void onWriteCancelled() {
+                                    super.onWriteCancelled();
+                                    result.onError("Write cancelled");
                                 }
                             });
                 } catch (FileNotFoundException e) {
                     if (!outputFile.delete()) {
-                        Log.e("PDF", "Unable to delete temporary file");
+                        Log.e(TAG, "Unable to delete temporary file");
                     }
                     result.onError(e.getMessage());
                 }
+            }
+
+            // ✅ NEW FIX: Layout Failure Handling (Rendering Error)
+            @Override
+            public void onLayoutFailed(CharSequence error) {
+                super.onLayoutFailed(error);
+                result.onError("Layout failed: " + error.toString());
+            }
+
+            // ✅ NEW FIX: Layout Cancelled Handling
+            @Override
+            public void onLayoutCancelled() {
+                super.onLayoutCancelled();
+                result.onError("Layout cancelled");
             }
         }, null);
     }
