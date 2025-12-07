@@ -5,7 +5,7 @@
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *     [http://www.apache.org/licenses/LICENSE-2.0](http://www.apache.org/licenses/LICENSE-2.0)
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -20,6 +20,7 @@ import android.content.Context;
 import android.os.Build;
 import android.os.CancellationSignal;
 import android.os.ParcelFileDescriptor;
+import android.text.TextUtils;
 import android.util.Log;
 
 import androidx.annotation.RequiresApi;
@@ -37,97 +38,174 @@ public class PdfConvert {
     public static void print(final Context context, final PrintDocumentAdapter adapter,
             final PrintAttributes attributes, final Result result) {
         
-        // CancellationSignal add kiya taaki hum process track kar sakein
+        // Null safety checks
+        if (context == null || adapter == null || attributes == null || result == null) {
+            Log.e(TAG, "Null parameters passed to print method");
+            if (result != null) {
+                result.onError("Invalid parameters: null context, adapter, or attributes");
+            }
+            return;
+        }
+        
         final CancellationSignal cancellationSignal = new CancellationSignal();
 
-        adapter.onLayout(null, attributes, cancellationSignal, new PrintDocumentAdapter.LayoutResultCallback() {
+        adapter.onLayout(null, attributes, cancellationSignal, 
+            new PrintDocumentAdapter.LayoutResultCallback() {
+            
             @Override
             public void onLayoutFinished(PrintDocumentInfo info, boolean changed) {
                 File outputDir = context.getCacheDir();
-                File outputFile;
+                File outputFile = null;
+                
                 try {
                     outputFile = File.createTempFile("printing", "pdf", outputDir);
                 } catch (IOException e) {
-                    result.onError(e.getMessage());
+                    String errorMsg = e.getMessage();
+                    result.onError(errorMsg != null ? errorMsg : "Failed to create temp file");
                     return;
                 }
 
+                final File finalOutputFile = outputFile;
+                
                 try {
-                    final File finalOutputFile = outputFile;
-                    adapter.onWrite(new PageRange[] {PageRange.ALL_PAGES},
-                            ParcelFileDescriptor.open(
-                                    outputFile, ParcelFileDescriptor.MODE_READ_WRITE),
-                            cancellationSignal,
-                            new PrintDocumentAdapter.WriteResultCallback() {
-                                @Override
-                                public void onWriteFinished(PageRange[] pages) {
-                                    super.onWriteFinished(pages);
-
-                                    if (pages.length == 0) {
-                                        if (!finalOutputFile.delete()) {
-                                            Log.e(TAG, "Unable to delete temporary file");
-                                        }
-                                        result.onError("No page created");
-                                    } else {
-                                        result.onSuccess(finalOutputFile);
-                                    }
-                                    
-                                    if (!finalOutputFile.delete()) {
-                                        Log.e(TAG, "Unable to delete temporary file");
-                                    }
+                    adapter.onWrite(
+                        new PageRange[] {PageRange.ALL_PAGES},
+                        ParcelFileDescriptor.open(
+                            finalOutputFile, 
+                            ParcelFileDescriptor.MODE_READ_WRITE
+                        ),
+                        cancellationSignal,
+                        new PrintDocumentAdapter.WriteResultCallback() {
+                            
+                            @Override
+                            public void onWriteFinished(PageRange[] pages) {
+                                super.onWriteFinished(pages);
+                                
+                                // Null safety check for pages array
+                                if (pages == null || pages.length == 0) {
+                                    cleanupFile(finalOutputFile);
+                                    result.onError("No pages created");
+                                    return;
                                 }
+                                
+                                // Success - file को अभी delete मत करो
+                                // यह Dart/Flutter layer में read होगी
+                                result.onSuccess(finalOutputFile);
+                            }
 
-                                // ✅ NEW FIX: Write Failure Handling
-                                @Override
-                                public void onWriteFailed(CharSequence error) {
-                                    super.onWriteFailed(error);
-                                    result.onError("Write failed: " + error.toString());
-                                }
+                            @Override
+                            public void onWriteFailed(CharSequence error) {
+                                super.onWriteFailed(error);
+                                
+                                cleanupFile(finalOutputFile);
+                                
+                                // Safe null handling for CharSequence
+                                String errorMsg = TextUtils.isEmpty(error) 
+                                    ? "Write operation failed" 
+                                    : error.toString();
+                                
+                                result.onError("Write failed: " + errorMsg);
+                            }
 
-                                // ✅ NEW FIX: Write Cancelled Handling
-                                @Override
-                                public void onWriteCancelled() {
-                                    super.onWriteCancelled();
-                                    result.onError("Write cancelled");
-                                }
-                            });
+                            @Override
+                            public void onWriteCancelled() {
+                                super.onWriteCancelled();
+                                
+                                cleanupFile(finalOutputFile);
+                                result.onError("Write operation cancelled by user");
+                            }
+                        }
+                    );
+                    
                 } catch (FileNotFoundException e) {
-                    if (!outputFile.delete()) {
-                        Log.e(TAG, "Unable to delete temporary file");
-                    }
-                    result.onError(e.getMessage());
+                    cleanupFile(finalOutputFile);
+                    
+                    String errorMsg = e.getMessage();
+                    result.onError(errorMsg != null ? errorMsg : "File not found");
+                    
+                } catch (Exception e) {
+                    // Catch any unexpected exceptions
+                    cleanupFile(finalOutputFile);
+                    
+                    String errorMsg = e.getMessage();
+                    result.onError("Unexpected error: " + 
+                        (errorMsg != null ? errorMsg : "Unknown error"));
                 }
             }
 
-            // ✅ NEW FIX: Layout Failure Handling (Rendering Error)
             @Override
             public void onLayoutFailed(CharSequence error) {
                 super.onLayoutFailed(error);
-                result.onError("Layout failed: " + error.toString());
+                
+                // Safe null handling for CharSequence
+                String errorMsg = TextUtils.isEmpty(error) 
+                    ? "Layout operation failed" 
+                    : error.toString();
+                
+                result.onError("Layout failed: " + errorMsg);
             }
 
-            // ✅ NEW FIX: Layout Cancelled Handling
             @Override
             public void onLayoutCancelled() {
                 super.onLayoutCancelled();
-                result.onError("Layout cancelled");
+                result.onError("Layout operation cancelled by user");
             }
+            
         }, null);
     }
 
-    public static byte[] readFile(File file) throws IOException {
-        byte[] buffer = new byte[(int) file.length()];
-        try (InputStream ios = new FileInputStream(file)) {
-            if (ios.read(buffer) == -1) {
-                throw new IOException("EOF reached while trying to read the whole file");
+    /**
+     * Helper method to safely delete temporary files
+     */
+    private static void cleanupFile(File file) {
+        if (file != null && file.exists()) {
+            if (!file.delete()) {
+                Log.w(TAG, "Unable to delete temporary file: " + file.getAbsolutePath());
             }
         }
+    }
+
+    /**
+     * Reads file content into byte array
+     * @throws IOException if file reading fails
+     */
+    public static byte[] readFile(File file) throws IOException {
+        if (file == null) {
+            throw new IOException("File is null");
+        }
+        
+        if (!file.exists()) {
+            throw new IOException("File does not exist: " + file.getAbsolutePath());
+        }
+        
+        long fileLength = file.length();
+        if (fileLength > Integer.MAX_VALUE) {
+            throw new IOException("File is too large: " + fileLength + " bytes");
+        }
+        
+        byte[] buffer = new byte[(int) fileLength];
+        
+        try (InputStream ios = new FileInputStream(file)) {
+            int bytesRead = ios.read(buffer);
+            
+            if (bytesRead == -1) {
+                throw new IOException("EOF reached while trying to read the whole file");
+            }
+            
+            if (bytesRead != fileLength) {
+                throw new IOException("Could not completely read file. Expected: " + 
+                    fileLength + " bytes, Read: " + bytesRead + " bytes");
+            }
+        }
+        
         return buffer;
     }
 
+    /**
+     * Result callback interface
+     */
     public interface Result {
         void onSuccess(File file);
-
         void onError(String message);
     }
 }
