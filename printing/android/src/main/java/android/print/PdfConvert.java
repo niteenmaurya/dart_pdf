@@ -1,17 +1,5 @@
 /*
  * Copyright (C) 2017, David PHAM-VAN <dev.nfet.net@gmail.com>
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
  */
 
 package android.print;
@@ -32,67 +20,146 @@ import java.io.InputStream;
 
 @RequiresApi(api = Build.VERSION_CODES.KITKAT)
 public class PdfConvert {
+    private static final String TAG = "PdfConvert";
+
     public static void print(final Context context, final PrintDocumentAdapter adapter,
             final PrintAttributes attributes, final Result result) {
-        adapter.onLayout(null, attributes, null, new PrintDocumentAdapter.LayoutResultCallback() {
+        
+        // ✅ Minimal null check
+        if (context == null || adapter == null || attributes == null || result == null) {
+            Log.e(TAG, "Null parameters");
+            if (result != null) {
+                result.onError("Invalid parameters");
+            }
+            return;
+        }
+        
+        final CancellationSignal cancellationSignal = new CancellationSignal();
+
+        adapter.onLayout(null, attributes, cancellationSignal, 
+            new PrintDocumentAdapter.LayoutResultCallback() {
+            
             @Override
             public void onLayoutFinished(PrintDocumentInfo info, boolean changed) {
                 File outputDir = context.getCacheDir();
                 File outputFile;
+                
                 try {
                     outputFile = File.createTempFile("printing", "pdf", outputDir);
                 } catch (IOException e) {
-                    result.onError(e.getMessage());
+                    result.onError(e.getMessage() != null ? e.getMessage() : "Failed to create temp file");
                     return;
                 }
 
+                final File finalOutputFile = outputFile;
+                
                 try {
-                    final File finalOutputFile = outputFile;
-                    adapter.onWrite(new PageRange[] {PageRange.ALL_PAGES},
-                            ParcelFileDescriptor.open(
-                                    outputFile, ParcelFileDescriptor.MODE_READ_WRITE),
-                            new CancellationSignal(),
-                            new PrintDocumentAdapter.WriteResultCallback() {
-                                @Override
-                                public void onWriteFinished(PageRange[] pages) {
-                                    super.onWriteFinished(pages);
-
-                                    if (pages.length == 0) {
-                                        if (!finalOutputFile.delete()) {
-                                            Log.e("PDF", "Unable to delete temporary file");
-                                        }
-                                        result.onError("No page created");
-                                    }
-
+                    adapter.onWrite(
+                        new PageRange[] {PageRange.ALL_PAGES},
+                        ParcelFileDescriptor.open(finalOutputFile, ParcelFileDescriptor.MODE_READ_WRITE),
+                        cancellationSignal,
+                        new PrintDocumentAdapter.WriteResultCallback() {
+                            
+                            @Override
+                            public void onWriteFinished(PageRange[] pages) {
+                                super.onWriteFinished(pages);
+                                
+                                // ✅ Simple validation
+                                if (pages != null && pages.length > 0) {
                                     result.onSuccess(finalOutputFile);
-                                    if (!finalOutputFile.delete()) {
-                                        Log.e("PDF", "Unable to delete temporary file");
+                                } else {
+                                    // Clean up only on error
+                                    if (finalOutputFile.exists()) {
+                                        finalOutputFile.delete();
                                     }
+                                    result.onError("No pages created");
                                 }
-                            });
+                            }
+
+                            @Override
+                            public void onWriteFailed(CharSequence error) {
+                                super.onWriteFailed(error);
+                                
+                                // Clean up on failure
+                                if (finalOutputFile != null && finalOutputFile.exists()) {
+                                    finalOutputFile.delete();
+                                }
+                                
+                                String errorMsg = (error != null && error.length() > 0) 
+                                    ? error.toString() 
+                                    : "Write failed";
+                                result.onError(errorMsg);
+                            }
+
+                            @Override
+                            public void onWriteCancelled() {
+                                super.onWriteCancelled();
+                                
+                                // Clean up on cancel
+                                if (finalOutputFile != null && finalOutputFile.exists()) {
+                                    finalOutputFile.delete();
+                                }
+                                result.onError("Write cancelled");
+                            }
+                        }
+                    );
+                    
                 } catch (FileNotFoundException e) {
-                    if (!outputFile.delete()) {
-                        Log.e("PDF", "Unable to delete temporary file");
+                    if (finalOutputFile != null && finalOutputFile.exists()) {
+                        finalOutputFile.delete();
                     }
-                    result.onError(e.getMessage());
+                    result.onError(e.getMessage() != null ? e.getMessage() : "File not found");
                 }
             }
+
+            @Override
+            public void onLayoutFailed(CharSequence error) {
+                super.onLayoutFailed(error);
+                
+                String errorMsg = (error != null && error.length() > 0) 
+                    ? error.toString() 
+                    : "Layout failed";
+                result.onError(errorMsg);
+            }
+
+            @Override
+            public void onLayoutCancelled() {
+                super.onLayoutCancelled();
+                result.onError("Layout cancelled");
+            }
+            
         }, null);
     }
 
+    /**
+     * Reads file content into byte array
+     */
     public static byte[] readFile(File file) throws IOException {
-        byte[] buffer = new byte[(int) file.length()];
+        if (file == null || !file.exists()) {
+            throw new IOException("File does not exist");
+        }
+        
+        long fileLength = file.length();
+        if (fileLength > Integer.MAX_VALUE) {
+            throw new IOException("File too large");
+        }
+        
+        byte[] buffer = new byte[(int) fileLength];
+        
         try (InputStream ios = new FileInputStream(file)) {
             if (ios.read(buffer) == -1) {
-                throw new IOException("EOF reached while trying to read the whole file");
+                throw new IOException("Could not read file");
             }
         }
+        
         return buffer;
     }
 
+    /**
+     * Result callback interface
+     */
     public interface Result {
         void onSuccess(File file);
-
         void onError(String message);
     }
 }
